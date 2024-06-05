@@ -1,9 +1,10 @@
+use dirs;
 use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tl::NodeHandle;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fs::File, io::Write};
 
 type WalkthroughArticlesByIssueLink = HashMap<String, Vec<WalkthroughArticle>>;
 
@@ -30,12 +31,18 @@ fn main() {
             acc
         });
     // println!("{:#?}", links);
-    // print_stats(&walkthrough_articles);
 }
 
 fn store_locally(articles: &WalkthroughArticlesByIssueLink) {
+    let path = {
+        let mut p = dirs::home_dir().unwrap();
+        p.push(".rust_walkthrough_articles");
+        p
+    };
+    let mut file = File::create(path).unwrap();
+
     let raw_bytes = serde_json::to_vec(articles).unwrap();
-    std::fs::write("$HOME/.rust_walkthrough_articles", raw_bytes).unwrap();
+    file.write_all(&raw_bytes).unwrap();
     info!("stored result to $HOME/.rust_walkthrough_articles");
 }
 

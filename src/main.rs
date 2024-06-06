@@ -3,7 +3,6 @@ mod walkthrough_article;
 
 use std::path::{Path, PathBuf};
 
-use dirs;
 use log::info;
 
 use walkthrough_article::{WalkthroughArticle, WalkthroughArticlesByIssueLink};
@@ -26,8 +25,7 @@ fn main() -> Result<()> {
     let walkthrough_articles_by_issue_link = get_local_or_scrape_walkthrough_articles(&local_path)?;
 
     let links = walkthrough_articles_by_issue_link
-        .iter()
-        .map(|(_, links)| links)
+        .values()
         .fold(Vec::new(), |mut acc, links| {
             acc.extend(links.iter());
             acc
@@ -38,7 +36,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_as_markdown_list(links: &Vec<&WalkthroughArticle>) {
+fn print_as_markdown_list(links: &[&WalkthroughArticle]) {
     println!(
         "{}",
         links

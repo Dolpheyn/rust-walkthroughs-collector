@@ -36,38 +36,35 @@ pub fn scrape_walkthrough_articles_by_issue_link() -> Result<WalkthroughArticles
     // iterate through all issue links & get walkthrough articles
     let walkthrough_articles = issue_links.par_iter().map(|issue_link| {
         info!("getting past issue - {issue_link}");
-        let issue_page_html = get_page_html(&issue_link);
+        let issue_page_html = get_page_html(issue_link);
         let issue_page_dom = tl::parse(&issue_page_html, tl::ParserOptions::default()).unwrap();
 
         (
             issue_link,
             get_walkthrough_articles(&issue_page_dom)
-                .expect(format!("failed to get walkthrough_article for {issue_link}").as_str()),
+                .unwrap_or_else(|_| panic!("failed to get walkthrough_article for {issue_link}")),
         )
     });
 
     Ok(walkthrough_articles
         .fold(
-            || HashMap::new(),
+            HashMap::new,
             |mut map, (issue_link, walkthrough_articles)| {
                 map.insert(issue_link.clone(), walkthrough_articles);
                 map
             },
         )
-        .reduce(
-            || HashMap::new(),
-            |mut map, m| {
-                for (issue_link, walkthrough_articles) in m {
-                    map.insert(issue_link, walkthrough_articles);
-                }
-                map
-            },
-        ))
+        .reduce(HashMap::new, |mut map, m| {
+            for (issue_link, walkthrough_articles) in m {
+                map.insert(issue_link, walkthrough_articles);
+            }
+            map
+        }))
 }
 
 fn get_page_html(url: &str) -> String {
     let res = reqwest::blocking::get(url).unwrap();
-    return res.text().unwrap();
+    res.text().unwrap()
 }
 
 fn get_all_issue_links(past_issues_page_dom: &tl::VDom) -> Vec<String> {
@@ -88,13 +85,10 @@ fn get_all_issue_links(past_issues_page_dom: &tl::VDom) -> Vec<String> {
         // colelct into `issue_links` Vec
         let a_handle = div_dom.query_selector("a").unwrap().next().unwrap();
         let a_node = a_handle.get(div_dom.parser()).unwrap();
-        match a_node {
-            tl::Node::Tag(a_tag_node) => {
-                let attrs = a_tag_node.attributes();
-                let href = attrs.get("href").unwrap().unwrap();
-                issue_links.push(href.as_utf8_str().to_string());
-            }
-            _ => {}
+        if let tl::Node::Tag(a_tag_node) = a_node {
+            let attrs = a_tag_node.attributes();
+            let href = attrs.get("href").unwrap().unwrap();
+            issue_links.push(href.as_utf8_str().to_string());
         }
     }
 
@@ -142,15 +136,11 @@ fn get_walkthrough_articles(issue_page_dom: &tl::VDom) -> Result<Vec<Walkthrough
 
         let maybe_list_href = list_item_dom
             .query_selector("a")
-            .map(|mut iter| iter.next())
-            .flatten()
-            .map(|handle| handle.get(list_item_dom.parser()))
-            .flatten()
-            .map(tl::Node::as_tag)
-            .flatten()
+            .and_then(|mut iter| iter.next())
+            .and_then(|handle| handle.get(list_item_dom.parser()))
+            .and_then(tl::Node::as_tag)
             .map(HTMLTag::attributes)
-            .map(|tag| tag.get("href"))
-            .flatten()
+            .and_then(|attrs| attrs.get("href"))
             .flatten()
             .map(|href| href.as_utf8_str().to_string());
 

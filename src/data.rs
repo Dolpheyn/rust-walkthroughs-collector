@@ -1,9 +1,14 @@
-use std::{collections::HashMap, fs::File, io::Write, path::Path};
+use std::{
+    collections::HashMap,
+    fs::{read, File},
+    io::Write,
+    path::Path,
+};
 
 use log::info;
 use rayon::prelude::*;
-use tl::HTMLTag;
-use tl::NodeHandle;
+use reqwest::blocking::get;
+use tl::{HTMLTag, Node::Tag, NodeHandle};
 
 use crate::{Result, WalkthroughArticle, WalkthroughArticlesByIssueLink};
 
@@ -15,7 +20,7 @@ where
         return Ok(None);
     }
 
-    let file_content = String::from_utf8(std::fs::read(path)?)?;
+    let file_content = String::from_utf8(read(path)?)?;
     if file_content.is_empty() {
         return Ok(None);
     }
@@ -29,8 +34,7 @@ pub fn scrape_walkthrough_articles_by_issue_link() -> Result<WalkthroughArticles
     // get all past issue links
     let past_issues_page_html =
         get_page_html("https://this-week-in-rust.org/blog/archives/index.html");
-    let past_issues_page_dom =
-        tl::parse(&past_issues_page_html, tl::ParserOptions::default()).unwrap();
+    let past_issues_page_dom = tl::parse(&past_issues_page_html, tl::ParserOptions::default())?;
     let issue_links = get_all_issue_links(&past_issues_page_dom);
 
     // iterate through all issue links & get walkthrough articles
@@ -47,23 +51,20 @@ pub fn scrape_walkthrough_articles_by_issue_link() -> Result<WalkthroughArticles
     });
 
     Ok(walkthrough_articles
-        .fold(
-            HashMap::new,
-            |mut map, (issue_link, walkthrough_articles)| {
-                map.insert(issue_link.clone(), walkthrough_articles);
-                map
-            },
-        )
+        .fold(HashMap::new, |mut map, (issue_link, articles)| {
+            map.insert(issue_link.clone(), articles);
+            map
+        })
         .reduce(HashMap::new, |mut map, m| {
-            for (issue_link, walkthrough_articles) in m {
-                map.insert(issue_link, walkthrough_articles);
+            for (issue_link, articles) in m {
+                map.insert(issue_link, articles);
             }
             map
         }))
 }
 
 fn get_page_html(url: &str) -> String {
-    let res = reqwest::blocking::get(url).unwrap();
+    let res = get(url).unwrap();
     res.text().unwrap()
 }
 
@@ -85,7 +86,7 @@ fn get_all_issue_links(past_issues_page_dom: &tl::VDom) -> Vec<String> {
         // colelct into `issue_links` Vec
         let a_handle = div_dom.query_selector("a").unwrap().next().unwrap();
         let a_node = a_handle.get(div_dom.parser()).unwrap();
-        if let tl::Node::Tag(a_tag_node) = a_node {
+        if let Tag(a_tag_node) = a_node {
             let attrs = a_tag_node.attributes();
             let href = attrs.get("href").unwrap().unwrap();
             issue_links.push(href.as_utf8_str().to_string());

@@ -1,13 +1,16 @@
 mod data;
 mod walkthrough_article;
 
-use std::path::{Path, PathBuf};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 use log::info;
 
 use walkthrough_article::{WalkthroughArticle, WalkthroughArticlesByIssueLink};
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 // $HOME/.rust_walkthrough_articles
 #[inline]

@@ -8,7 +8,7 @@ use std::{
 use log::info;
 use rayon::prelude::*;
 use reqwest::blocking::get;
-use tl::{HTMLTag, Node::Tag, NodeHandle};
+use tl::{Bytes, HTMLTag, Node::Tag, NodeHandle};
 
 use crate::{Result, WalkthroughArticle, WalkthroughArticlesByIssueLink};
 
@@ -135,15 +135,19 @@ fn get_walkthrough_articles(issue_page_dom: &tl::VDom) -> Result<Vec<Walkthrough
         let list_item_html = list_item_node.inner_html(walkthrough_list_dom.parser());
         let list_item_dom = tl::parse(list_item_html.as_ref(), tl::ParserOptions::default())?;
 
+        let get_node = |handle: NodeHandle| handle.get(list_item_dom.parser());
+
         let maybe_list_href = list_item_dom
             .query_selector("a")
-            .and_then(|mut iter| iter.next())
-            .and_then(|handle| handle.get(list_item_dom.parser()))
+            .and_then(|mut elems| elems.next())
+            .and_then(get_node)
             .and_then(tl::Node::as_tag)
             .map(HTMLTag::attributes)
             .and_then(|attrs| attrs.get("href"))
             .flatten()
-            .map(|href| href.as_utf8_str().to_string());
+            .map(&Bytes::as_utf8_str)
+            .as_deref()
+            .map(ToString::to_string);
 
         if maybe_list_href.is_none() {
             continue;

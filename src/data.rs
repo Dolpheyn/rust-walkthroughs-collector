@@ -4,10 +4,8 @@ use std::{
     io::Write,
     path::Path,
 };
-use std::error::Error;
 use std::sync::Arc;
 
-use async_channel::{Receiver, Sender};
 use futures::{prelude::*, StreamExt};
 use log::info;
 use tl::{Bytes, HTMLTag, Node::Tag, NodeHandle};
@@ -44,6 +42,10 @@ pub fn scrape_walkthrough_articles_by_issue_link() -> Result<WalkthroughArticles
     ))
 }
 
+// Long types (Clippy was screaming)
+type TokioRuntimeError = Arc<Mutex<Vec<(String, Vec<WalkthroughArticle>)>>>;
+type ArticlesUnflattened = Vec<(String, Vec<WalkthroughArticle>)>;
+
 pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>)>> {
     let past_issues_page_html =
         get_page_html_blocking("https://this-week-in-rust.org/blog/archives/index.html".to_owned());
@@ -53,21 +55,15 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
     let issue_links = get_all_issue_links(&past_issues_page_dom);
 
     // Download and parsing should be done seperately with a channel in between
-    let ret: std::prelude::v1::Result<
-        Arc<Mutex<Vec<(String, Vec<WalkthroughArticle>)>>>,
-        Box<dyn Error>,
-    > = tokio::runtime::Builder::new_multi_thread()
+    let ret: Result<TokioRuntimeError> = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(16)
         .build()
         .unwrap()
         .block_on(async {
-            let walkthrough_articles: Arc<Mutex<Vec<(String, Vec<WalkthroughArticle>)>>> =
+            let walkthrough_articles: Arc<Mutex<ArticlesUnflattened>> =
                 Default::default();
-            let (sender, receiver): (
-                Sender<Option<(String, String)>>,
-                Receiver<Option<(String, String)>>,
-            ) = async_channel::unbounded::<Option<(String, String)>>();
+            let (sender, receiver) = async_channel::unbounded::<Option<(String, String)>>();
 
             let blocking_sender = tokio::task::spawn(async move {
                 // get Past Issues page https://this-week-in-rust.org/blog/archives/index.html
@@ -79,7 +75,7 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
                     let sender_local = sender.clone();
                     futures.push(tokio::task::spawn(async move {
                         let link_and_page = get_page_html(link).await;
-                        _ = sender_local.send(Some(link_and_page)).await.unwrap();
+                        sender_local.send(Some(link_and_page)).await.unwrap();
                     }));
 
                     // If queue is 'full' start to poll next so at least 1 is completed
@@ -93,7 +89,7 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
 
                 loop {
                     // Complete remaining futures bro
-                    if futures.len() > 0 {
+                    if !futures.is_empty() {
                         _ = futures.next().await;
                     } else {
                         break;
@@ -106,10 +102,8 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
             let (fut_sender, fut_receiver) = async_channel::unbounded();
             let walkthrough_articles_worker_scope = walkthrough_articles.clone();
             let worker_loop = tokio::task::spawn(async move {
-                loop {
-                    let walkthrough_articles_loop_scope = walkthrough_articles_worker_scope.clone();
-                    match receiver.recv().await {
-                        Ok(page) => {
+                    while let Ok(page) = receiver.recv().await {
+                            let walkthrough_articles_loop_scope = walkthrough_articles_worker_scope.clone();
                             if page.is_none() {
                                 break;
                             }
@@ -141,9 +135,6 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
                                     }))
                                     .await;
                             }
-                        }
-                        Err(_) => break,
-                    };
                 }
             });
 
@@ -152,13 +143,8 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
             _ = blocking_sender.await;
             _ = worker_loop.await;
 
-            loop {
-                match fut_receiver.recv().await {
-                    Ok(fut) => fut.await.unwrap(),
-                    Err(_) => {
-                        break;
-                    }
-                }
+            while let Ok(fut) = fut_receiver.recv().await {
+                fut.await.unwrap();
             }
 
             Ok(walkthrough_articles)
@@ -168,7 +154,7 @@ pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>
 }
 
 fn get_page_html_blocking(url: String) -> String {
-    let res = reqwest::blocking::get(&url).unwrap();
+    let res = reqwest::blocking::get(url).unwrap();
     res.text().unwrap()
 }
 
@@ -254,7 +240,7 @@ fn get_walkthrough_articles(issue_page_dom: &tl::VDom) -> Result<Vec<Walkthrough
             .map(HTMLTag::attributes)
             .and_then(|attrs| attrs.get("href"))
             .flatten()
-            .map(&Bytes::as_utf8_str)
+            .map(Bytes::as_utf8_str)
             .as_deref()
             .map(ToString::to_string);
 

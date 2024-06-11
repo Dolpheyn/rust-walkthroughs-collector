@@ -4,11 +4,14 @@ use std::{
     io::Write,
     path::Path,
 };
+use std::error::Error;
+use std::sync::Arc;
 
+use async_channel::{Receiver, Sender};
+use futures::{prelude::*, StreamExt};
 use log::info;
-use rayon::prelude::*;
-use reqwest::blocking::get;
 use tl::{Bytes, HTMLTag, Node::Tag, NodeHandle};
+use tokio::sync::Mutex;
 
 use crate::{Result, WalkthroughArticle, WalkthroughArticlesByIssueLink};
 
@@ -29,43 +32,149 @@ where
 }
 
 pub fn scrape_walkthrough_articles_by_issue_link() -> Result<WalkthroughArticlesByIssueLink> {
-    // get Past Issues page https://this-week-in-rust.org/blog/archives/index.html
-    // parse into Dom
-    // get all past issue links
-    let past_issues_page_html =
-        get_page_html("https://this-week-in-rust.org/blog/archives/index.html");
-    let past_issues_page_dom = tl::parse(&past_issues_page_html, tl::ParserOptions::default())?;
-    let issue_links = get_all_issue_links(&past_issues_page_dom);
+    // Downloading and reducing should be done in a seperate step because duhhhh
+    let data = scrape_walkthrough_inner().unwrap();
 
-    // iterate through all issue links & get walkthrough articles
-    let walkthrough_articles = issue_links.par_iter().map(|issue_link| {
-        info!("getting past issue - {issue_link}");
-        let issue_page_html = get_page_html(issue_link);
-        let issue_page_dom = tl::parse(&issue_page_html, tl::ParserOptions::default()).unwrap();
-
-        (
-            issue_link,
-            get_walkthrough_articles(&issue_page_dom)
-                .unwrap_or_else(|_| panic!("failed to get walkthrough_article for {issue_link}")),
-        )
-    });
-
-    Ok(walkthrough_articles
-        .fold(HashMap::new, |mut map, (issue_link, articles)| {
-            map.insert(issue_link.clone(), articles);
+    Ok(data.into_iter().fold(
+        HashMap::new(),
+        |mut map, (issue_link, walkthrough_articles)| {
+            map.insert(issue_link, walkthrough_articles);
             map
-        })
-        .reduce(HashMap::new, |mut map, m| {
-            for (issue_link, articles) in m {
-                map.insert(issue_link, articles);
-            }
-            map
-        }))
+        },
+    ))
 }
 
-fn get_page_html(url: &str) -> String {
-    let res = get(url).unwrap();
+pub fn scrape_walkthrough_inner() -> Result<Vec<(String, Vec<WalkthroughArticle>)>> {
+    let past_issues_page_html =
+        get_page_html_blocking("https://this-week-in-rust.org/blog/archives/index.html".to_owned());
+    let past_issues_page_dom =
+        tl::parse(&past_issues_page_html, tl::ParserOptions::default()).unwrap();
+
+    let issue_links = get_all_issue_links(&past_issues_page_dom);
+
+    // Download and parsing should be done seperately with a channel in between
+    let ret: std::prelude::v1::Result<
+        Arc<Mutex<Vec<(String, Vec<WalkthroughArticle>)>>>,
+        Box<dyn Error>,
+    > = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(16)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let walkthrough_articles: Arc<Mutex<Vec<(String, Vec<WalkthroughArticle>)>>> =
+                Default::default();
+            let (sender, receiver): (
+                Sender<Option<(String, String)>>,
+                Receiver<Option<(String, String)>>,
+            ) = async_channel::unbounded::<Option<(String, String)>>();
+
+            let blocking_sender = tokio::task::spawn(async move {
+                // get Past Issues page https://this-week-in-rust.org/blog/archives/index.html
+                // parse into Dom
+                // get all past issue links
+                let mut futures = stream::FuturesUnordered::new();
+
+                for link in issue_links {
+                    let sender_local = sender.clone();
+                    futures.push(tokio::task::spawn(async move {
+                        let link_and_page = get_page_html(link).await;
+                        _ = sender_local.send(Some(link_and_page)).await.unwrap();
+                    }));
+
+                    // If queue is 'full' start to poll next so at least 1 is completed
+                    // (making sure we're not go over file descriptor limit shown at `ulimit`)
+                    // bUT WhAt If wE SeT fILe DEScriptOr lImIt tO UnLiMiTEd ThO?
+                    // nobody sane will do that
+                    if futures.len() >= 80 {
+                        _ = futures.next().await;
+                    }
+                }
+
+                loop {
+                    // Complete remaining futures bro
+                    if futures.len() > 0 {
+                        _ = futures.next().await;
+                    } else {
+                        break;
+                    }
+                }
+
+                _ = sender.send(Option::None).await;
+            });
+
+            let (fut_sender, fut_receiver) = async_channel::unbounded();
+            let walkthrough_articles_worker_scope = walkthrough_articles.clone();
+            let worker_loop = tokio::task::spawn(async move {
+                loop {
+                    let walkthrough_articles_loop_scope = walkthrough_articles_worker_scope.clone();
+                    match receiver.recv().await {
+                        Ok(page) => {
+                            if page.is_none() {
+                                break;
+                            }
+                            if let Some(page) = page {
+                                let page = page.clone();
+                                _ = fut_sender
+                                    .send(tokio::task::spawn(async move {
+                                        let link_and_article = tokio::task::spawn_blocking(|| {
+                                            let page = page;
+                                            let issue_page_dom =
+                                                tl::parse(&page.1, tl::ParserOptions::default());
+                                            let issue_page_dom = issue_page_dom.unwrap();
+
+                                            let walkthrough =
+                                                get_walkthrough_articles(&issue_page_dom).expect(
+                                                    format!(
+                                                        "failed to get walkthrough_article for {}",
+                                                        page.0
+                                                    )
+                                                    .as_str(),
+                                                );
+                                            (page.0.clone(), walkthrough)
+                                        });
+
+                                        let mut guard =
+                                            walkthrough_articles_loop_scope.lock().await;
+                                        guard.push(link_and_article.await.unwrap());
+                                        drop(guard);
+                                    }))
+                                    .await;
+                            }
+                        }
+                        Err(_) => break,
+                    };
+                }
+            });
+
+            // Some dark magic here (we're just making sure all link is sent into the channel,
+            // THEN make sure all worker loop is spawned and queued)
+            _ = blocking_sender.await;
+            _ = worker_loop.await;
+
+            loop {
+                match fut_receiver.recv().await {
+                    Ok(fut) => fut.await.unwrap(),
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+
+            Ok(walkthrough_articles)
+        });
+
+    Ok(Arc::into_inner(ret.unwrap()).unwrap().into_inner())
+}
+
+fn get_page_html_blocking(url: String) -> String {
+    let res = reqwest::blocking::get(&url).unwrap();
     res.text().unwrap()
+}
+
+async fn get_page_html(url: String) -> (String, String) {
+    let res = reqwest::get(&url).await.unwrap();
+    (url, res.text().await.unwrap())
 }
 
 fn get_all_issue_links(past_issues_page_dom: &tl::VDom) -> Vec<String> {

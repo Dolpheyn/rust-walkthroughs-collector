@@ -12,6 +12,7 @@ use std::{
 use lazy_static::lazy_static;
 use log::info;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use soup::prelude::*;
 
 use walkthrough_article::{WalkthroughArticle, WalkthroughArticlesByIssueLink};
@@ -54,7 +55,8 @@ fn main() -> Result<()> {
             .take(0)
             .collect(),
         &out_dir_scrape,
-    )?;
+    )
+    .expect("'scrape err'");
 
     let out_dir_contents = format!("{}{}", out_dir, "contents/");
     extract_contents(&out_dir_scrape, &out_dir_contents)?;
@@ -72,21 +74,25 @@ fn extract_contents(scrape_dir: &str, out_dir_contents: &str) -> Result<()> {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap());
 
     filenames.for_each(|filename| {
-        let file_content =
-            String::from_utf8(fs::read(format!("{}{}", scrape_dir, &filename)).unwrap()).unwrap();
+        let file_content: WalkthroughArticleContent = serde_json::from_str(
+            String::from_utf8(fs::read(format!("{}{}", scrape_dir, &filename)).unwrap())
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
         let tags_to_find = HashSet::from(["title", "p", "ul", "ol"]);
-        let tags = Soup::new(&file_content)
+        let tags = Soup::new(&file_content.content)
             .tag(true)
             .find_all()
             .filter(|t| tags_to_find.contains(t.name()));
 
-        let content = tags
+        let extracted_content = tags
             .map(|t| t.text().trim().to_string())
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
 
-        if content.trim().is_empty() {
+        if extracted_content.trim().is_empty() {
             return;
         }
 
@@ -95,9 +101,14 @@ fn extract_contents(scrape_dir: &str, out_dir_contents: &str) -> Result<()> {
             return;
         }
 
+        let extracted = WalkthroughArticleContent {
+            content: extracted_content.clone(),
+            ..file_content
+        };
+
         File::create(out_file)
             .unwrap()
-            .write_all(content.as_bytes())
+            .write_all(serde_json::to_vec(&extracted).unwrap().as_slice())
             .unwrap();
     });
 
@@ -112,6 +123,10 @@ lazy_static! {
         "www.youtube.com".to_string(),
         "youtu.be".to_string(),
         "www.youtu.be".to_string(),
+        "blog.budshome.com".to_string(),
+        "www.blog.budshome.com".to_string(),
+        "edgarluque.com".to_string(),
+        "www.edgarluque.com".to_string(),
     ]);
 }
 fn should_scrape(article: &WalkthroughArticle) -> bool {
@@ -134,6 +149,13 @@ fn should_scrape(article: &WalkthroughArticle) -> bool {
     !HOSTS_TO_IGNORE.contains(host)
 }
 
+#[derive(Serialize, Deserialize)]
+struct WalkthroughArticleContent {
+    pub title: String,
+    pub link: String,
+    pub content: String,
+}
+
 fn scrape(links: &Vec<&WalkthroughArticle>, out_dir_scrape: &str) -> Result<()> {
     if !PathBuf::from(&out_dir_scrape).exists() {
         fs::create_dir(&out_dir_scrape)?;
@@ -146,9 +168,15 @@ fn scrape(links: &Vec<&WalkthroughArticle>, out_dir_scrape: &str) -> Result<()> 
             return;
         }
 
+        let scraped_article = WalkthroughArticleContent {
+            title: l.title.clone(),
+            link: link.clone(),
+            content: data::get_page_html(&link),
+        };
+
         File::create(out_file)
             .unwrap()
-            .write_all(data::get_page_html(&link).as_bytes())
+            .write_all(serde_json::to_vec(&scraped_article).unwrap().as_slice())
             .unwrap();
     });
 

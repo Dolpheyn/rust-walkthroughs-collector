@@ -64,6 +64,7 @@ pub fn scrape_walkthrough_articles_by_issue_link() -> Result<WalkthroughArticles
 }
 
 pub fn get_page_html(url: &str) -> String {
+    info!("[get_page_html] getting html {}", url);
     let res = get(url).unwrap();
     res.text().unwrap()
 }
